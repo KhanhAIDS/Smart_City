@@ -1,0 +1,221 @@
+services:
+  mqtt:
+    container_name: mqtt
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+  frigate:
+    depends_on:
+      - mqtt
+    container_name: frigate
+    restart: unless-stopped
+    image: ghcr.io/blakeblackshear/frigate:stable
+    shm_size: "16g"
+    mem_limit: 8g
+    cpus: "14.0"
+    environment:
+      - GO2RTC_ALLOW_ARBITRARY_EXEC=true
+    volumes:
+      - ./config.yml:/config/config.yml
+      - ./storage:/media/frigate
+      - ./videos:/media/frigate/videos:ro
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "5000:5000"
+      - "8556:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  crowd_gpu:
+    container_name: crowd_gpu
+    build: ./model_workers/rf_detr_large
+    restart: unless-stopped
+    mem_limit: 12g
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DETECTION_THRESHOLD=0.5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  locate_gpu:
+    container_name: locate_gpu
+    build: ./model_workers/locate_anything_3b
+    restart: "no"
+    profiles: ["benchmark"]
+    mem_limit: 16g
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DETECTION_THRESHOLD=0.5
+    volumes:
+      - ./model_cache/locate_hf:/opt/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  fire_gpu:
+    container_name: fire_gpu
+    build: ./model_workers/fire_smoke
+    restart: unless-stopped
+    mem_limit: 6g
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DETECTION_THRESHOLD=0.25
+    volumes:
+      - ./model_cache/fire_hf:/opt/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ai_worker:
+    depends_on:
+      - mqtt
+      - frigate
+      - crowd_gpu
+    container_name: ai_worker
+    build: 
+      context: .
+      dockerfile: ./ai_worker/Dockerfile
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "1.0"
+    volumes:
+      - ./config.py:/app/config.py
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - FRIGATE_API=http://frigate:5000
+      - ACTIVE_PROBLEM=
+      - ALERT_TOPIC=ai_worker/alerts/crowd
+      - LOITERING_ALERT_TOPIC=ai_worker/alerts/loitering
+      - CROWD_CAMERAS=NONE_CAMERA
+      - LOITERING_CAMERAS=cam_loiter
+      - LOITERING_DWELL_SECONDS=40
+      - MODAL_ENDPOINT_URL=http://crowd_gpu:8000/detect
+      - MODAL_REQUEST_TIMEOUT=90
+      - CROWD_THRESHOLD=3
+
+  dashboard:
+    depends_on:
+      - mqtt
+      - frigate
+      - perception_worker
+    container_name: dashboard
+    build: 
+      context: .
+      dockerfile: ./dashboard/Dockerfile
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "1.0"
+    volumes: []
+    ports:
+      - "8080:8080"
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - FRIGATE_API=http://frigate:5000
+      - ALERT_TOPIC=ai_worker/alerts/crowd
+      - ALERT_TOPIC_WILDCARD=ai_worker/alerts/#
+      - EVENTS_TOPIC=frigate/events
+      - STALE_SECONDS=30
+      - CLUSTER_SIZE_RATIO_MIN=0.8
+      - CLUSTER_DISTANCE_FACTOR=1.2
+      - CLUSTER_CROWD_THRESHOLD=3
+      - REALTIME_OVERLAY_TTL_MS=1200
+      - PORT=8080
+      - BENCHMARK_ENDPOINTS=[{"name":"rfdetr-large","url":"http://crowd_gpu:8000/detect"},{"name":"locate-anything-3b","url":"http://locate_gpu:8000/detect"}]
+
+  stream_core:
+    depends_on:
+      - mqtt
+      - frigate
+    container_name: stream_core
+    build: ./stream_core
+    profiles: ["realtime-benchmark"]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "2.0"
+    ports:
+      - "8092:8092"
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - STREAM_CORE_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire
+      - STREAM_CORE_RTSP_TEMPLATE=rtsp://frigate:8554/{}
+      - STREAM_CORE_FPS=5
+      - STREAM_CORE_STALE_SECONDS=15
+      - STREAM_CORE_RECONNECT_SECONDS=5
+
+  perception_worker:
+    depends_on:
+      - mqtt
+      - frigate
+      - crowd_gpu
+      - fire_gpu
+    container_name: perception_worker
+    build: 
+      context: .
+      dockerfile: ./perception_worker/Dockerfile
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: "2.0"
+    ports:
+      - "8093:8093"
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - PERCEPTION_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire
+      - PERCEPTION_PERSON_CAMERAS=cam1_VIRAT_1,cam_loiter
+      - PERCEPTION_FIRE_CAMERAS=cam_fire
+      - PERCEPTION_RTSP_TEMPLATE=rtsp://frigate:8554/{}
+      - PERCEPTION_FPS=8
+      - PERCEPTION_STALE_SECONDS=30
+      - PERCEPTION_RECONNECT_SECONDS=5
+      - PERSON_DETECT_URL=http://crowd_gpu:8000/detect
+      - FIRE_SMOKE_ENDPOINT_URL=http://fire_gpu:8000/detect
+      - PERSON_DETECT_TIMEOUT=10
+      - FIRE_DETECT_TIMEOUT=10
+      - PERCEPTION_ALLOW_HTTP_FETCH=false
+      - PERCEPTION_JPEG_QUALITY=80
+      - PERCEPTION_TRACKER=bytetrack
+      - PERCEPTION_MIN_CONFIDENCE=0.5
+      - LOITERING_DWELL_SECONDS=40
+      - CROWD_THRESHOLD=3
+      - CROWD_PERSIST_SECONDS=5
+      - CLUSTER_SIZE_RATIO_MIN=0.8
+      - CLUSTER_DISTANCE_FACTOR=1.2
+      - FIRE_CONFIDENCE=0.40
+      - FIRE_PERSIST_N=2
+      - FIRE_PERSIST_M=5
+      - FIRE_CLEAR_SECONDS=4
+      - PERCEPTION_TOPIC_PREFIX=perception
+      - REALTIME_OVERLAY_TTL_MS=1200
+      - REALTIME_ALERT_REPEAT_SECONDS=15

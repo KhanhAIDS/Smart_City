@@ -1,0 +1,17 @@
+.git
+.venv
+docs
+storage
+videos
+model_cache
+mosquitto/data
+mosquitto/log
+dashboard/frontend/node_modules
+dashboard/frontend/dist
+__pycache__
+*.mp4
+*.pt
+*.onnx
+*.webp
+data
+*.db

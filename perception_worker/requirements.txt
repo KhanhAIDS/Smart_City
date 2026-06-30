@@ -1,0 +1,5 @@
+paho-mqtt==2.1.0
+requests
+numpy
+opencv-python-headless
+supervision==0.27.0

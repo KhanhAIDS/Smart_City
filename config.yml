@@ -1,0 +1,113 @@
+mqtt:
+  enabled: true
+  host: mqtt
+  port: 1883
+
+detectors:
+  ov:
+    type: openvino
+    device: CPU
+
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+
+detect:
+  enabled: true
+  fps: 5
+
+objects:
+  track:
+    - person
+    - bicycle
+    - car
+    - motorcycle
+    - bus
+    - truck
+
+record:
+  enabled: true
+  continuous:
+    days: 0.0007
+  alerts:
+    retain:
+      days: 0.0007
+      mode: all
+  detections:
+    retain:
+      days: 0.0007
+      mode: all
+
+snapshots:
+  enabled: true
+  timestamp: true
+  bounding_box: true
+  retain:
+    default: 0.0007
+
+go2rtc:
+  webrtc:
+    candidates:
+      - 192.168.3.252:8555
+  streams:
+    cam1_VIRAT_1:
+      - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/cam1_VIRAT_1.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
+    cam_loiter:
+      - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/cam_loiter.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
+    cam_fire:
+      - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/cam_fire_baseline.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
+    cam4_entry_area:
+      - ffmpeg:/media/frigate/videos/motion-detection-entry-area-1280x720.mp4
+    cam6_warehouse_door:
+      - ffmpeg:/media/frigate/videos/motion-detection-warehouse-door-1920x1080.mp4
+
+cameras:
+
+  cam1_VIRAT_1:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam1_VIRAT_1
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      width: 1920
+      height: 1080
+      fps: 5
+
+  cam_loiter:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_loiter
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      width: 1280
+      height: 720
+      fps: 8
+      stationary:
+        interval: 5
+        threshold: 50
+    motion:
+      threshold: 25
+      contour_area: 5
+
+  cam_fire:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_fire
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+
+
+
+version: 0.17-0

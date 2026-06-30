@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+mosquitto/log/
+storage/
+model_cache/
+videos/
+*.mp4
+*.webp
+*.pt
+*.onnx
