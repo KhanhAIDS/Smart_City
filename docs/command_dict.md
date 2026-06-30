@@ -59,6 +59,7 @@ Vì thư mục dự án cần được sao lưu hoặc chia sẻ, dưới đây 
 git init                                   # Khởi tạo kho lưu trữ Git cục bộ
 git config --global user.name "Tên Bạn"    # Cài đặt tên (bắt buộc trước khi commit)
 git config --global user.email "Email Bạn" # Cài đặt email (bắt buộc trước khi commit)
+git branch -M main # Sửa tên nhánh chính thành main (chuẩn mới của Github)
 git remote add origin <URL_của_Github>     # Liên kết với kho chứa trên Github (VD: https://github.com/user/repo.git)
 
 # Quy trình lưu code (Thường xuyên sử dụng)
