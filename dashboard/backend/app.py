@@ -77,6 +77,7 @@ def on_mqtt_connect(client, userdata, flags, rc):
         "perception/tracks/#",
         "perception/crowd/#",
         "perception/fire_smoke/#",
+        "perception/lpr/#",
         "perception/alerts/#",
     ]
     for topic in topics:
@@ -93,6 +94,8 @@ def infer_realtime_alert_type(payload):
         return "loitering_alert"
     if "fire_count" in payload or "smoke_count" in payload:
         return "fire_smoke_alert"
+    if "plate_text" in payload or "plate_count" in payload:
+        return "lpr_alert"
     return "realtime_alert"
 
 
@@ -109,6 +112,8 @@ def map_mqtt_topic(topic, payload):
         camera = payload.get("camera") or topic.rsplit("/", 1)[-1]
         last_realtime_fire_seen[camera] = time.monotonic()
         return "realtime_fire_smoke"
+    if topic.startswith("perception/lpr/"):
+        return "realtime_lpr"
     if topic.startswith("perception/alerts/"):
         if topic.startswith("perception/alerts/fire_smoke"):
             camera = payload.get("camera")
@@ -335,7 +340,7 @@ async def system_health():
         details["perception_worker"] = "error"
         
     # Check model endpoints directly
-    for model, url in [("crowd_gpu", "http://crowd_gpu:8000/health"), ("fire_gpu", "http://fire_gpu:8000/health")]:
+    for model, url in [("crowd_gpu", "http://crowd_gpu:8000/health"), ("fire_gpu", "http://fire_gpu:8000/health"), ("lpr_gpu", "http://lpr_gpu:8000/health")]:
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=3)

@@ -4,8 +4,8 @@ import type {
   CrowdOverlayState,
   LoiterOverlayState,
   FireOverlayState,
+  LprOverlayState,
   TimelineEntry,
-  ToastItem,
   WsMessage,
 } from "./types";
 import { fetchConfig } from "./lib/api";
@@ -13,11 +13,10 @@ import { useLiveChannel } from "./lib/useLiveChannel";
 import Header from "./components/Header";
 import CameraGrid from "./components/CameraGrid";
 import EventsTimeline from "./components/EventsTimeline";
-import AlertToast from "./components/AlertToast";
 import BenchmarkPanel from "./components/BenchmarkPanel";
 
 const OVERLAY_TTL_MS = 1200;
-const TOAST_TTL_MS = 8000;
+const LPR_OVERLAY_TTL_MS = 2000;
 const MAX_TIMELINE = 80;
 
 function pruneStale<T extends { receivedAt: number }>(
@@ -40,8 +39,8 @@ export default function App() {
   const [crowdOverlays, setCrowdOverlays] = useState<Record<string, CrowdOverlayState>>({});
   const [loiters, setLoiters] = useState<Record<string, LoiterOverlayState>>({});
   const [fires, setFires] = useState<Record<string, FireOverlayState>>({});
+  const [lprs, setLprs] = useState<Record<string, LprOverlayState>>({});
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const counter = useRef(0);
   const dimsRef = useRef<Record<string, { width: number; height: number }>>({});
@@ -63,19 +62,12 @@ export default function App() {
       setCrowdOverlays((prev) => pruneStale(prev, now, OVERLAY_TTL_MS));
       setLoiters((prev) => pruneStale(prev, now, OVERLAY_TTL_MS));
       setFires((prev) => pruneStale(prev, now, OVERLAY_TTL_MS));
+      setLprs((prev) => pruneStale(prev, now, LPR_OVERLAY_TTL_MS));
     }, 500);
     return () => clearInterval(t);
   }, []);
 
   const nextId = () => `${Date.now()}-${counter.current++}`;
-
-  const pushToast = (t: Omit<ToastItem, "id">) => {
-    const id = nextId();
-    setToasts((prev) => [{ id, ...t }, ...prev].slice(0, 4));
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== id));
-    }, TOAST_TTL_MS);
-  };
 
   const pushTimeline = (e: Omit<TimelineEntry, "id">) => {
     setTimeline((prev) => [{ id: nextId(), ...e }, ...prev].slice(0, MAX_TIMELINE));
@@ -142,6 +134,18 @@ export default function App() {
           receivedAt: now,
         },
       }));
+    } else if (msg.type === "realtime_lpr") {
+      const d = msg.data;
+      const plates = d.plates || [];
+      if (plates.length === 0) return;
+      setLprs((prev) => ({
+        ...prev,
+        [d.camera]: {
+          plates,
+          inferenceResolution: [d.width, d.height],
+          receivedAt: now,
+        },
+      }));
     } else if (msg.type === "realtime_alert") {
       const d = msg.data;
       if (d.person_count !== undefined) {
@@ -153,7 +157,6 @@ export default function App() {
                   [d.camera]: { ...existing, personCount: d.person_count || 0, threshold: 3, receivedAt: now }
                 };
              });
-             pushToast({ kind: "crowd", camera: d.camera, message: `Crowd detected` });
              pushTimeline({ kind: "crowd", camera: d.camera, text: `Crowd detected`, ts: now });
          } else {
              setCrowdOverlays((prev) => {
@@ -183,7 +186,6 @@ export default function App() {
               },
             }));
             if (d.dwell_time && d.dwell_time >= 40) {
-               pushToast({ kind: "loitering", camera: d.camera, message: `Loitering ${Math.round(d.dwell_time)}s` });
                pushTimeline({ kind: "loitering", camera: d.camera, text: `Loitering ${Math.round(d.dwell_time)}s`, ts: now });
             }
          }
@@ -214,8 +216,39 @@ export default function App() {
                 }));
              }
              const label = fc && sc ? "Fire + smoke detected" : fc ? "Fire detected" : "Smoke detected";
-             pushToast({ kind: "fire", camera: d.camera, message: label });
              pushTimeline({ kind: "fire", camera: d.camera, text: `${label} (fire ${fc}, smoke ${sc})`, ts: now });
+          }
+      } else if (d.plate_text !== undefined) {
+          if (d.active) {
+             const resolution = d.inference_resolution || (d.width && d.height ? [d.width, d.height] as [number, number] : null);
+             if (d.bbox && resolution) {
+                setLprs((prev) => ({
+                  ...prev,
+                  [d.camera]: {
+                    plates: [{
+                      bbox: d.bbox!,
+                      det_confidence: d.det_confidence || 0,
+                      text: d.plate_text || "",
+                      raw_text: d.plate_text || "",
+                      ocr_confidence: d.ocr_confidence || 0,
+                      confidence: d.confidence || 0,
+                    }],
+                    inferenceResolution: resolution,
+                    receivedAt: now,
+                  },
+                }));
+             }
+             pushTimeline({
+               kind: "lpr",
+               camera: d.camera,
+               text: `Plate ${d.plate_text}`,
+               ts: now,
+               imageUrl: d.plate_crop,
+               plateText: d.plate_text,
+               detConf: d.det_confidence,
+               ocrConf: d.ocr_confidence,
+               conf: d.confidence,
+             });
           }
       }
     } else if (msg.type === "crowd_alert" || msg.type === "loitering_alert" || msg.type === "fire_smoke_alert") {
@@ -254,7 +287,7 @@ export default function App() {
         {tab === "live" ? (
           <div className="h-full flex">
             <div className="flex-1 overflow-y-auto">
-              <CameraGrid cameras={cameras} crowd={crowdOverlays} loiter={loiters} fire={fires} />
+              <CameraGrid cameras={cameras} crowd={crowdOverlays} loiter={loiters} fire={fires} lpr={lprs} />
             </div>
             <div className="w-80 shrink-0 h-full">
               <EventsTimeline entries={timeline} />
@@ -266,7 +299,6 @@ export default function App() {
           </div>
         )}
       </main>
-      <AlertToast toasts={toasts} />
     </div>
   );
 }

@@ -12,6 +12,15 @@ export interface Detection {
   class?: "fire" | "smoke";
 }
 
+export interface PlateDetection {
+  bbox: Bbox;
+  det_confidence: number;
+  text: string;
+  raw_text: string;
+  ocr_confidence: number;
+  confidence: number;
+}
+
 export interface CrowdAlert {
   camera: string;
   person_count: number;
@@ -82,6 +91,7 @@ export type WsMessage =
   | { type: "realtime_objects"; data: RealtimeObjectsMsg }
   | { type: "realtime_crowd"; data: RealtimeCrowdMsg }
   | { type: "realtime_fire_smoke"; data: RealtimeFireSmokeMsg }
+  | { type: "realtime_lpr"; data: RealtimeLprMsg }
   | { type: "realtime_alert"; data: RealtimeAlertMsg };
 
 export interface BenchmarkModelResult {
@@ -102,7 +112,7 @@ export interface BenchmarkResponse {
   results: BenchmarkModelResult[];
 }
 
-export type AlertKind = "crowd" | "loitering" | "fire";
+export type AlertKind = "crowd" | "loitering" | "fire" | "lpr";
 
 export interface TimelineEntry {
   id: string;
@@ -110,13 +120,11 @@ export interface TimelineEntry {
   camera: string;
   text: string;
   ts: number;
-}
-
-export interface ToastItem {
-  id: string;
-  kind: AlertKind;
-  camera: string;
-  message: string;
+  imageUrl?: string;
+  plateText?: string;
+  detConf?: number;
+  ocrConf?: number;
+  conf?: number;
 }
 
 export interface CrowdOverlayState {
@@ -145,6 +153,12 @@ export interface FireOverlayState {
   fireCount: number;
   smokeCount: number;
   active: boolean;
+  receivedAt: number;
+}
+
+export interface LprOverlayState {
+  plates: PlateDetection[];
+  inferenceResolution: [number, number];
   receivedAt: number;
 }
 
@@ -185,6 +199,15 @@ export interface RealtimeFireSmokeMsg {
   fire_count: number;
   smoke_count: number;
 }
+export interface RealtimeLprMsg {
+  camera: string;
+  source: string;
+  frame_id: number;
+  width: number;
+  height: number;
+  plates: PlateDetection[];
+  plate_count: number;
+}
 export interface RealtimeAlertMsg {
   camera: string;
   source: string;
@@ -208,4 +231,11 @@ export interface RealtimeAlertMsg {
   fire_count?: number;
   smoke_count?: number;
   detections?: Detection[];
+  plate_text?: string;
+  plate_count?: number;
+  stable_hits?: number;
+  det_confidence?: number;
+  ocr_confidence?: number;
+  confidence?: number;
+  plate_crop?: string;
 }

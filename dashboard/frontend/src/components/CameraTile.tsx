@@ -4,6 +4,7 @@ import type {
   CrowdOverlayState,
   LoiterOverlayState,
   FireOverlayState,
+  LprOverlayState,
 } from "../types";
 import { startWebRTC } from "../lib/liveStream";
 import { snapshotUrl } from "../lib/api";
@@ -13,6 +14,7 @@ interface Props {
   crowd?: CrowdOverlayState;
   loiter?: LoiterOverlayState;
   fire?: FireOverlayState;
+  lpr?: LprOverlayState;
 }
 
 function FireOverlay({ fire }: { fire: FireOverlayState }) {
@@ -48,6 +50,49 @@ function FireOverlay({ fire }: { fire: FireOverlayState }) {
               fontWeight="bold"
             >
               {d.class === "smoke" ? "SMOKE" : "FIRE"} {(d.confidence * 100).toFixed(0)}%
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+
+function LprOverlay({ lpr }: { lpr: LprOverlayState }) {
+  const [w, h] = lpr.inferenceResolution;
+  return (
+    <svg
+      className="absolute inset-0 w-full h-full pointer-events-none"
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="xMidYMid slice"
+    >
+      {lpr.plates.map((p, i) => {
+        const [x1, y1, x2, y2] = p.bbox;
+        const label = p.text || p.raw_text || "PLATE";
+        const color = "#06b6d4";
+        const fontSize = Math.max(h * 0.024, 14);
+        return (
+          <g key={i}>
+            <rect
+              style={{ transition: "all 0.15s linear" }}
+              x={x1}
+              y={y1}
+              width={x2 - x1}
+              height={y2 - y1}
+              fill="none"
+              stroke={color}
+              strokeWidth={3}
+            />
+            <text
+              style={{ transition: "all 0.15s linear" }}
+              x={x1}
+              y={Math.max(y1 - 6, fontSize)}
+              fill={color}
+              fontSize={fontSize}
+              fontWeight="bold"
+            >
+              {label} {(p.confidence * 100).toFixed(0)}%
             </text>
           </g>
         );
@@ -197,7 +242,7 @@ async function captureFrame(camera: string) {
   }
 }
 
-export default function CameraTile({ camera, crowd, loiter, fire }: Props) {
+export default function CameraTile({ camera, crowd, loiter, fire, lpr }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [webrtcFailed, setWebrtcFailed] = useState(false);
   const [forceSnapshot, setForceSnapshot] = useState(false);
@@ -251,11 +296,13 @@ export default function CameraTile({ camera, crowd, loiter, fire }: Props) {
   const crowdOver = !!crowd && crowd.personCount >= crowd.threshold;
   const fireActive = !!fire && fire.active;
   const loiterActive = !!loiter && loiter.active;
+  const lprActive = !!lpr && lpr.plates.length > 0;
 
   let border = "border-gray-800";
   if (fireActive) border = "border-red-600";
   else if (crowdOver) border = "border-red-500";
   else if (loiterActive) border = "border-amber-500";
+  else if (lprActive) border = "border-cyan-500";
 
   return (
     <div className={`relative rounded-lg overflow-hidden border-2 ${border} bg-black aspect-video`}>
@@ -272,6 +319,7 @@ export default function CameraTile({ camera, crowd, loiter, fire }: Props) {
       )}
 
       {fire && fire.active && <FireOverlay fire={fire} />}
+      {lpr && <LprOverlay lpr={lpr} />}
       {loiter && loiter.active && <LoiterOverlay loiter={loiter} />}
       {crowd && <CrowdOverlay crowd={crowd} />}
 
@@ -320,6 +368,11 @@ export default function CameraTile({ camera, crowd, loiter, fire }: Props) {
         {loiterActive && (
           <span className="text-xs px-2 py-0.5 rounded bg-amber-500 text-black font-semibold">
             LOITERING
+          </span>
+        )}
+        {lprActive && (
+          <span className="text-xs px-2 py-0.5 rounded bg-cyan-500 text-black font-semibold">
+            LPR {lpr!.plates.length}
           </span>
         )}
       </div>

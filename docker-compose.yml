@@ -95,6 +95,30 @@ services:
               count: 1
               capabilities: [gpu]
 
+  lpr_gpu:
+    container_name: lpr_gpu
+    build: ./model_workers/lpr_plate_ocr
+    restart: unless-stopped
+    mem_limit: 6g
+    cpus: "4.0"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LPR_OCR_MODEL=cct-xs-v2-global-model
+      - LPR_DETECTOR_CONFIDENCE=0.35
+      - LPR_DETECTOR_IMGSZ=640
+      - OPENCV_NUM_THREADS=2
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+    volumes:
+      - ./model_cache/lpr_hf:/opt/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   ai_worker:
     depends_on:
       - mqtt
@@ -180,6 +204,7 @@ services:
       - frigate
       - crowd_gpu
       - fire_gpu
+      - lpr_gpu
     container_name: perception_worker
     build: 
       context: .
@@ -192,17 +217,21 @@ services:
     environment:
       - MQTT_HOST=mqtt
       - MQTT_PORT=1883
-      - PERCEPTION_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire
+      - PERCEPTION_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire,cam_lpr
       - PERCEPTION_PERSON_CAMERAS=cam1_VIRAT_1,cam_loiter
       - PERCEPTION_FIRE_CAMERAS=cam_fire
+      - PERCEPTION_LPR_CAMERAS=cam_lpr
       - PERCEPTION_RTSP_TEMPLATE=rtsp://frigate:8554/{}
       - PERCEPTION_FPS=8
       - PERCEPTION_STALE_SECONDS=30
       - PERCEPTION_RECONNECT_SECONDS=5
       - PERSON_DETECT_URL=http://crowd_gpu:8000/detect
       - FIRE_SMOKE_ENDPOINT_URL=http://fire_gpu:8000/detect
+      - LPR_ENDPOINT_URL=http://lpr_gpu:8000/detect
       - PERSON_DETECT_TIMEOUT=10
       - FIRE_DETECT_TIMEOUT=10
+      - LPR_DETECT_TIMEOUT=10
+      - LPR_FPS=3
       - PERCEPTION_ALLOW_HTTP_FETCH=false
       - PERCEPTION_JPEG_QUALITY=80
       - PERCEPTION_TRACKER=bytetrack
@@ -216,6 +245,12 @@ services:
       - FIRE_PERSIST_N=2
       - FIRE_PERSIST_M=5
       - FIRE_CLEAR_SECONDS=4
+      - LPR_STABLE_N=3
+      - LPR_STABLE_M=5
+      - LPR_ALERT_REPEAT_SECONDS=30
+      - LPR_MIN_OCR_CONF=0.6
+      - LPR_MIN_DET_CONF=0.5
+      - DETECTOR_HEALTH_TIMEOUT=5
       - PERCEPTION_TOPIC_PREFIX=perception
       - REALTIME_OVERLAY_TTL_MS=1200
       - REALTIME_ALERT_REPEAT_SECONDS=15

@@ -3,6 +3,7 @@ import type {
   CrowdOverlayState,
   LoiterOverlayState,
   FireOverlayState,
+  LprOverlayState,
 } from "../types";
 import CameraTile from "./CameraTile";
 
@@ -11,9 +12,10 @@ interface Props {
   crowd: Record<string, CrowdOverlayState>;
   loiter: Record<string, LoiterOverlayState>;
   fire: Record<string, FireOverlayState>;
+  lpr: Record<string, LprOverlayState>;
 }
 
-export default function CameraGrid({ cameras, crowd, loiter, fire }: Props) {
+export default function CameraGrid({ cameras, crowd, loiter, fire, lpr }: Props) {
   if (cameras.length === 0) {
     return <div className="p-6 text-gray-500">No enabled cameras.</div>;
   }
@@ -26,6 +28,7 @@ export default function CameraGrid({ cameras, crowd, loiter, fire }: Props) {
           crowd={crowd[c.name]}
           loiter={loiter[c.name]}
           fire={fire[c.name]}
+          lpr={lpr[c.name]}
         />
       ))}
     </div>

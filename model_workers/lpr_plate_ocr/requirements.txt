@@ -1,0 +1,9 @@
+ultralytics==8.3.0
+fast-plate-ocr==1.1.0
+onnxruntime==1.27.0
+huggingface_hub
+fastapi
+uvicorn[standard]
+pillow
+numpy
+opencv-python-headless

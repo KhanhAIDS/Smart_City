@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sys
@@ -24,6 +25,7 @@ def csv_env(name, default):
 CAMERAS = csv_env("PERCEPTION_CAMERAS", "cam1_VIRAT_1,cam_loiter,cam_fire")
 PERSON_CAMERAS = set(csv_env("PERCEPTION_PERSON_CAMERAS", "cam1_VIRAT_1,cam_loiter"))
 FIRE_CAMERAS = set(csv_env("PERCEPTION_FIRE_CAMERAS", "cam_fire"))
+LPR_CAMERAS = set(csv_env("PERCEPTION_LPR_CAMERAS", ""))
 RTSP_TEMPLATE = os.getenv("PERCEPTION_RTSP_TEMPLATE", "rtsp://frigate:8554/{}")
 FPS = float(os.getenv("PERCEPTION_FPS", "8"))
 STALE_SECONDS = float(os.getenv("PERCEPTION_STALE_SECONDS", "30"))
@@ -33,8 +35,11 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 TOPIC_PREFIX = os.getenv("PERCEPTION_TOPIC_PREFIX", "perception")
 PERSON_DETECT_URL = os.getenv("PERSON_DETECT_URL", "http://crowd_gpu:8000/detect")
 FIRE_SMOKE_ENDPOINT_URL = os.getenv("FIRE_SMOKE_ENDPOINT_URL", "http://fire_gpu:8000/detect")
+LPR_ENDPOINT_URL = os.getenv("LPR_ENDPOINT_URL", "http://lpr_gpu:8000/detect")
+LPR_FPS = float(os.getenv("LPR_FPS", "1"))
 PERSON_DETECT_TIMEOUT = float(os.getenv("PERSON_DETECT_TIMEOUT", "10"))
 FIRE_DETECT_TIMEOUT = float(os.getenv("FIRE_DETECT_TIMEOUT", os.getenv("PERSON_DETECT_TIMEOUT", "10")))
+LPR_DETECT_TIMEOUT = float(os.getenv("LPR_DETECT_TIMEOUT", os.getenv("PERSON_DETECT_TIMEOUT", "10")))
 JPEG_QUALITY = int(os.getenv("PERCEPTION_JPEG_QUALITY", "80"))
 MIN_CONFIDENCE = float(os.getenv("PERCEPTION_MIN_CONFIDENCE", "0.5"))
 FIRE_CONFIDENCE = float(os.getenv("FIRE_CONFIDENCE", "0.40"))
@@ -49,6 +54,15 @@ CLUSTER_DISTANCE_FACTOR = float(os.getenv("CLUSTER_DISTANCE_FACTOR", os.getenv("
 FIRE_PERSIST_N = int(os.getenv("FIRE_PERSIST_N", "2"))
 FIRE_PERSIST_M = int(os.getenv("FIRE_PERSIST_M", "5"))
 FIRE_CLEAR_SECONDS = float(os.getenv("FIRE_CLEAR_SECONDS", "4"))
+LPR_STABLE_N = max(1, int(os.getenv("LPR_STABLE_N", "3")))
+LPR_STABLE_M = max(LPR_STABLE_N, int(os.getenv("LPR_STABLE_M", "5")))
+LPR_ALERT_REPEAT_SECONDS = float(os.getenv("LPR_ALERT_REPEAT_SECONDS", "30"))
+LPR_MIN_OCR_CONF = float(os.getenv("LPR_MIN_OCR_CONF", "0.6"))
+LPR_MIN_DET_CONF = float(os.getenv("LPR_MIN_DET_CONF", "0.5"))
+LPR_CROP_PAD_RATIO = float(os.getenv("LPR_CROP_PAD_RATIO", "0.12"))
+LPR_CROP_MAX_WIDTH = int(os.getenv("LPR_CROP_MAX_WIDTH", "320"))
+LPR_CROP_JPEG_QUALITY = int(os.getenv("LPR_CROP_JPEG_QUALITY", "80"))
+DETECTOR_HEALTH_TIMEOUT = float(os.getenv("DETECTOR_HEALTH_TIMEOUT", "5"))
 ALLOW_HTTP_FRAME_FETCH = os.getenv("PERCEPTION_ALLOW_HTTP_FETCH", "false").strip().lower() in {"1", "true", "yes", "on"}
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000")
 
@@ -75,6 +89,8 @@ class CameraState:
         self.fire_active = False
         self.fire_seen = 0.0
         self.last_fire_alert_time = 0.0
+        self.lpr_history = deque(maxlen=LPR_STABLE_M)
+        self.last_lpr_alert_times = {}
 
 
 states = {cam: CameraState() for cam in CAMERAS}
@@ -235,8 +251,10 @@ def check_detector_health():
         urls.append(PERSON_DETECT_URL.replace("/detect", "/health"))
     if FIRE_CAMERAS:
         urls.append(FIRE_SMOKE_ENDPOINT_URL.replace("/detect", "/health"))
+    if LPR_CAMERAS:
+        urls.append(LPR_ENDPOINT_URL.replace("/detect", "/health"))
     try:
-        return all(requests.get(url, timeout=2).ok for url in urls)
+        return all(requests.get(url, timeout=DETECTOR_HEALTH_TIMEOUT).ok for url in urls)
     except Exception:
         return False
 
@@ -248,6 +266,33 @@ def publish(topic, payload):
 def encode_jpeg(frame):
     ok, enc = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
     return enc.tobytes() if ok else None
+
+
+def crop_plate(frame, bbox):
+    if frame is None or not bbox:
+        return ""
+    try:
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        pad_x = (x2 - x1) * LPR_CROP_PAD_RATIO
+        pad_y = (y2 - y1) * LPR_CROP_PAD_RATIO
+        x1 = max(0, int(x1 - pad_x))
+        y1 = max(0, int(y1 - pad_y))
+        x2 = min(w, int(x2 + pad_x))
+        y2 = min(h, int(y2 + pad_y))
+        if x2 <= x1 or y2 <= y1:
+            return ""
+        crop = frame[y1:y2, x1:x2]
+        ch, cw = crop.shape[:2]
+        if cw > LPR_CROP_MAX_WIDTH:
+            scale = LPR_CROP_MAX_WIDTH / float(cw)
+            crop = cv2.resize(crop, (LPR_CROP_MAX_WIDTH, max(1, int(ch * scale))), interpolation=cv2.INTER_AREA)
+        ok, enc = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), LPR_CROP_JPEG_QUALITY])
+        if not ok:
+            return ""
+        return "data:image/jpeg;base64," + base64.b64encode(enc.tobytes()).decode("ascii")
+    except Exception:
+        return ""
 
 
 def query_detector(session, url, jpeg_bytes, timeout):
@@ -536,9 +581,95 @@ def process_fire_frame(camera, st, session, jpeg_bytes, frame_meta, now):
         publish_fire_clear(camera, st, frame_meta)
 
 
+
+def clean_plate_text(value):
+    if not value:
+        return ""
+    text = str(value).upper()
+    return "".join(ch for ch in text if ("A" <= ch <= "Z") or ("0" <= ch <= "9"))
+
+
+def lpr_plates(result):
+    out = []
+    for plate in result.get("plates", []):
+        bbox = clean_bbox(plate.get("bbox"))
+        if bbox is None:
+            continue
+        text = clean_plate_text(plate.get("text") or plate.get("raw_text"))
+        raw_text = str(plate.get("raw_text") or plate.get("text") or "")
+        det_conf = float(plate.get("det_confidence", 0.0))
+        ocr_conf = float(plate.get("ocr_confidence", 0.0))
+        conf = float(plate.get("confidence", min(det_conf, ocr_conf)))
+        out.append(
+            {
+                "bbox": bbox,
+                "det_confidence": det_conf,
+                "text": text,
+                "raw_text": raw_text,
+                "ocr_confidence": ocr_conf,
+                "confidence": conf,
+            }
+        )
+    return out
+
+
+def process_lpr_frame(camera, st, session, jpeg_bytes, frame, frame_meta, now):
+    result, latency = query_detector(session, LPR_ENDPOINT_URL, jpeg_bytes, LPR_DETECT_TIMEOUT)
+    update_latency(st, latency)
+    model = result.get("model", "lpr-detector")
+    frame_meta["model"] = model
+    plates = lpr_plates(result)
+    payload = {
+        "schema": "lpr.v1",
+        **frame_meta,
+        "plates": plates,
+        "plate_count": len(plates),
+    }
+    publish(f"{TOPIC_PREFIX}/lpr/{camera}", payload)
+
+    current_texts = {p["text"] for p in plates if p["text"]}
+    st.lpr_history.append(current_texts)
+    if not current_texts:
+        return
+
+    best = {}
+    for plate in plates:
+        text = plate["text"]
+        if not text:
+            continue
+        if text not in best or plate["confidence"] > best[text]["confidence"]:
+            best[text] = plate
+
+    for text, plate in best.items():
+        stable_hits = sum(1 for texts in st.lpr_history if text in texts)
+        confident = plate["ocr_confidence"] >= LPR_MIN_OCR_CONF and plate["det_confidence"] >= LPR_MIN_DET_CONF
+        if stable_hits < LPR_STABLE_N and not confident:
+            continue
+        last_alert = st.last_lpr_alert_times.get(text, 0.0)
+        if now - last_alert < LPR_ALERT_REPEAT_SECONDS:
+            continue
+        alert = {
+            **frame_meta,
+            "timestamp": frame_meta["wall_ts"],
+            "active": True,
+            "plate_text": text,
+            "bbox": plate["bbox"],
+            "det_confidence": plate["det_confidence"],
+            "ocr_confidence": plate["ocr_confidence"],
+            "confidence": plate["confidence"],
+            "stable_hits": stable_hits,
+            "inference_resolution": [frame_meta["width"], frame_meta["height"]],
+            "plate_crop": crop_plate(frame, plate["bbox"]),
+        }
+        publish(f"{TOPIC_PREFIX}/alerts/lpr", alert)
+        st.last_lpr_alert_times[text] = now
+
+
+def task_due(now, last_ts, fps):
+    return fps > 0 and now - last_ts >= 1.0 / fps
+
 def process_camera(camera):
     url = RTSP_TEMPLATE.format(camera)
-    period = 1.0 / FPS if FPS > 0 else 0.2
     st = states[camera]
     session = requests.Session()
 
@@ -560,7 +691,7 @@ def process_camera(camera):
             st.force_reconnect = False
             st.last_seen = time.time()
         last_seq = 0
-        last_process_ts = 0.0
+        last_task_ts = {"person": 0.0, "fire": 0.0, "lpr": 0.0}
 
         while True:
             with metrics_lock:
@@ -580,33 +711,47 @@ def process_camera(camera):
                 st.last_seen = now
                 st.stale = False
                 frame_id = st.frames_read
-            if now - last_process_ts < period:
+
+            tasks = []
+            if camera in PERSON_CAMERAS and task_due(now, last_task_ts["person"], FPS):
+                tasks.append("person")
+            if camera in FIRE_CAMERAS and task_due(now, last_task_ts["fire"], FPS):
+                tasks.append("fire")
+            if camera in LPR_CAMERAS and task_due(now, last_task_ts["lpr"], LPR_FPS):
+                tasks.append("lpr")
+            if not tasks:
                 continue
-            last_process_ts = now
+
             jpeg_bytes = encode_jpeg(frame)
             if jpeg_bytes is None:
                 continue
             height, width = frame.shape[:2]
             frame_meta = base_payload(camera, frame_id, utc_now(), time.monotonic(), width, height, url, "unknown")
-            try:
-                if camera in PERSON_CAMERAS:
-                    process_person_frame(camera, st, session, jpeg_bytes, frame_meta.copy(), now)
-                if camera in FIRE_CAMERAS:
-                    process_fire_frame(camera, st, session, jpeg_bytes, frame_meta.copy(), now)
+            ran = False
+            for task in tasks:
+                last_task_ts[task] = now
+                try:
+                    if task == "person":
+                        process_person_frame(camera, st, session, jpeg_bytes, frame_meta.copy(), now)
+                    elif task == "fire":
+                        process_fire_frame(camera, st, session, jpeg_bytes, frame_meta.copy(), now)
+                    elif task == "lpr":
+                        process_lpr_frame(camera, st, session, jpeg_bytes, frame, frame_meta.copy(), now)
+                    ran = True
+                except Exception as exc:
+                    with metrics_lock:
+                        st.detect_errors += 1
+                    print(f"[perception] frame error camera={camera} task={task}: {exc}")
+            if ran:
                 with metrics_lock:
                     st.frames_processed += 1
                     st.publish_count += 1
-            except Exception as exc:
-                with metrics_lock:
-                    st.detect_errors += 1
-                print(f"[perception] frame error camera={camera}: {exc}")
 
         grabber.release()
         with metrics_lock:
             st.grabber = None
             st.reconnects += 1
         time.sleep(RECONNECT_SECONDS)
-
 
 def watchdog():
     while True:

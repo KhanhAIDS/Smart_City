@@ -14,7 +14,7 @@
 
  CÁC CONFIG KHÔNG đặt được trong file này (vì ở container/file khác):
    • Frigate: camera, detect.fps, record, detector, go2rtc   -> config.yml
-   • cam1_VIRAT_1, cam_loiter, cam_fire đều single go2rtc exec + RTSP restream.
+   • cam1_VIRAT_1, cam_loiter, cam_fire, cam_lpr đều single go2rtc exec + RTSP restream.
    • Frigate motion/track theo TỪNG camera (bắt người nhỏ ở cam xa + nhịp re-detect người đứng yên):
        - motion.threshold     (nhạy pixel; mặc định 30; HẠ = nhạy hơn)
        - motion.contour_area  (diện tích motion tối thiểu; mặc định 10; HẠ = bắt người nhỏ/xa hơn — núm chính cho cam xa)
@@ -39,42 +39,50 @@
        - Topic realtime: perception/fire_smoke/<cam> (bbox từng frame), perception/alerts/fire_smoke (debounced alert/clear).
        - Dashboard vẽ bbox từ `realtime_fire_smoke`, chuẩn-hoá theo width/height hoặc inference_resolution.
        - ai_worker fire pump cũ đã tắt; không dùng ai_worker/alerts/fire_smoke trong compose mặc định.
-   • Phân cụm ở BENCHMARK (chạy trong container dashboard, KHÔNG đọc file này): tham số CLUSTER_SIZE_RATIO_MIN / CLUSTER_DISTANCE_FACTOR / CLUSTER_CROWD_THRESHOLD nằm ở dashboard/backend/config.py + env service dashboard trong docker-compose.yml. PHẢI giữ ĐỒNG BỘ tay với SIZE_RATIO_MIN / DISTANCE_FACTOR / CROWD_THRESHOLD ở file này thì overlay benchmark mới khớp live. Đổi xong: docker compose up -d dashboard (rebuild nếu sửa app.py).
-   • Overlay LOITERING & CROWD trên TILE LIVE ở DASHBOARD (frontend, sửa xong phải build lại dashboard):
-       - TỪ 2026-06-24 (D7, ĐẢO lại D3/D5): bbox loitering VÀ crowd vẽ TRỰC TIẾP trên tile live WebRTC bằng SVG
-         (cùng pattern overlay fire/smoke). Pop-up CameraInspectPanel ĐÃ XOÁ (+ helper inspectFrameUrl). Backend
-         route /inspect/<cam>/frame.jpg GIỮ trong app.py nhưng frontend KHÔNG còn gọi (dead route, bỏ sau cũng được).
-       - LOITERING (LoiterOverlay, dashboard/frontend/src/components/CameraTile.tsx): box amber #f59e0b + tag
-         "LOITERING {dwell}s" đếm client-side mỗi 1s. bbox = px TUYỆT ĐỐI ở DETECT-RES camera (camera.width/height
-         từ /dashboard/config, vd cam_loiter 1280x720) → viewBox=0 0 detectW detectH. Đánh đổi: box ở frame_time
-         quá khứ ⇒ người DI CHUYỂN trễ ~nhịp update Frigate (~2.4s); loiterer demo gần đứng yên nên không lộ.
-       - CROWD (CrowdOverlay, cam1_VIRAT_1 + cam_loiter): cluster_bbox đỏ #ef4444 nét đứt + box thành viên cụm
-         (detections[i], i in cluster_member_indices) xanh #22c55e nét liền — style như overlay BenchmarkPanel.
-         bbox = px tuyệt đối ở inference_resolution → viewBox theo inference_resolution. Box trễ người di chuyển
-         (đánh đổi đã chọn). Crowd event-driven + cooldown 5s, KHÔNG có message clear ⇒ chỉ dọn bằng TTL.
-       - dashboard/frontend/src/components/CameraTile.tsx -> LOITER_OVERLAY_TTL_MS (ms, hiện 10000): cửa sổ VIỀN cam
-         màu cam + render box loitering khi active. CROWD_OVERLAY_TTL_MS (ms, hiện 7000): gate render box crowd.
-       - dashboard/frontend/src/App.tsx -> LOITER_TTL_MS (ms, hiện 10000): TTL fallback dọn state loiter.
-         CROWD_OVERLAY_TTL_MS (ms, hiện 7000): TTL dọn state crowdOverlays (PHẢI khớp giá trị ở CameraTile.tsx).
-         TOAST_TTL_MS (ms, hiện 8000): thời gian sống của toast cảnh báo. FIRE_TTL_MS (ms, hiện 10000): TTL state fire.
-     (state loiter vẫn được clear ngay bằng message active=false khi object end; TTL chỉ là dự phòng. Crowd KHÔNG có
-      clear ⇒ TTL là cách duy nhất tắt box.)
-    • EVENTS PANEL (EventsTimeline) — D8 2026-06-24: hằng số dashboard/frontend/src/App.tsx -> SHOW_RAW_FRIGATE_EVENTS
-        (bool, hiện = false). false ⇒ timeline CHỈ hiện kết quả bài toán (crowd khi person_count>=threshold, loitering,
-        fire/smoke) bắn realtime qua /ws; KHÔNG fetch/trộn lịch sử /api/events và KHÔNG ingest row frigate_event
-        per-person/per-frame. Đổi = true để bật lại lịch sử Frigate thô (kèm refresh định kỳ EVENTS_REFRESH_MS).
-        Sửa xong: docker compose up -d --build dashboard.
+   • LPR / NHẬN DIỆN BIỂN SỐ (realtime RTSP, KHÔNG fetch latest.jpg):
+       - Camera cam_lpr -> config.yml, nguồn videos/Ground-level_off-side_road.mp4, detect 1920x1080@2fps.
+       - Model worker -> model_workers/lpr_plate_ocr, service lpr_gpu (GPU GB10). DETECTOR chạy PyTorch/CUDA (ultralytics YOLO), OCR fast-plate-ocr chạy CPU (onnxruntime). Dockerfile theo recipe GB10: cuda12.8-runtime + torch2.11.0+cu128 + pin nvidia-cuda-nvrtc-cu12==12.9.86 SAU torch. Weights cache host: ./model_cache/lpr_hf:/opt/hf.
+       - Model mặc định: detector YOLO11 morsetechlab/yolov11-license-plate-detection (file license-plate-finetune-v1s.pt, 1 class License_Plate) + OCR cct-xs-v2-global-model (CPU). Env service lpr_gpu: LPR_OCR_MODEL, LPR_DETECTOR_CONFIDENCE, LPR_DETECTOR_IMGSZ; override detector qua LPR_DETECTOR_REPO/LPR_DETECTOR_FILE (server.py có fallback list). LƯU Ý: không có YOLOv9 plate .pt ungated trên HF + onnxruntime-gpu không có wheel aarch64 → bỏ fast-alpr[onnx] CPU, chuyển detector sang torch/CUDA (YOLO11) để lên GPU; OCR CCT rất nhẹ nên để CPU.
+       - Env runtime nằm ở docker-compose.yml service perception_worker: PERCEPTION_LPR_CAMERAS, LPR_ENDPOINT_URL, LPR_FPS (hiện 3 — GPU ~21ms; hạ từ 5 để giảm tải, vẫn đủ frame cho gate alert), LPR_DETECT_TIMEOUT, LPR_STABLE_N/M, LPR_ALERT_REPEAT_SECONDS, LPR_MIN_OCR_CONF, LPR_MIN_DET_CONF.
+       - GATE ALERT: bắn khi (cùng plate_text đạt LPR_STABLE_N/M) HOẶC (1 lần đọc tự tin: ocr_confidence>=LPR_MIN_OCR_CONF=0.6 và det_confidence>=LPR_MIN_DET_CONF=0.5), repeat-suppress theo text 30s. Lý do có nhánh confident: cảnh giao thông xe chạy nhanh + biển nhỏ → mỗi biển thường chỉ đọc được 1 frame với text khác nhau, stable-read thuần gần như không bao giờ đạt (đo 2026-07-01). Muốn ít nhiễu hơn: nâng LPR_MIN_OCR_CONF hoặc dựng plate-tracking (future).
+       - Ảnh biển số CROP nhúng base64 vào alert perception/alerts/lpr (field plate_crop, data:image/jpeg) — CHỈ alert stable-read, KHÔNG nhét vào perception/lpr/<cam> để tránh phình MQTT. Env (mặc định ở perception_worker/worker.py, override ở docker-compose service perception_worker): LPR_CROP_PAD_RATIO=0.12, LPR_CROP_MAX_WIDTH=320, LPR_CROP_JPEG_QUALITY=80. Sửa xong: docker compose up -d --build perception_worker.
+       - Topic realtime: perception/lpr/<cam> (bbox+OCR từng frame), perception/alerts/lpr (stable-read alert + plate_crop, không active=false; dashboard dọn bằng TTL).
+   • Phân cụm ở BENCHMARK (chạy trong container dashboard): tham số CLUSTER_SIZE_RATIO_MIN / CLUSTER_DISTANCE_FACTOR /
+     CLUSTER_CROWD_THRESHOLD đọc TỪ ENV service dashboard trong docker-compose.yml (KHÔNG còn file dashboard/backend/config.py).
+     CÔNG THỨC phân cụm là 1 bản DÙNG CHUNG: smart_city_common/clustering.py::compute_crowd_clusters — import bởi CẢ
+     perception_worker LẪN dashboard/backend/app.py (không fork lại). Chỉ THAM SỐ cần khớp tay với perception_worker
+     (CLUSTER_SIZE_RATIO_MIN / CLUSTER_DISTANCE_FACTOR / CROWD_THRESHOLD) để overlay benchmark khớp live. Đổi: docker compose up -d --build dashboard.
+   • OVERLAY trên TILE LIVE (frontend, sửa xong build lại dashboard) — 4 overlay SVG trong dashboard/frontend/src/components/CameraTile.tsx,
+     cùng pattern viewBox + preserveAspectRatio="xMidYMid slice" (khớp <video> object-cover). KHÔNG còn pop-up: component
+     AlertToast + toast state đã XOÁ (2026-07-01: chồng lên panel event, không có nút tắt). Route /inspect + CameraInspectPanel cũng đã bỏ.
+       - LOITERING (LoiterOverlay): box amber #f59e0b + tag "LOITERING {dwell}s" đếm client-side. bbox = px TUYỆT ĐỐI ở
+         DETECT-RES camera (camera.width/height từ /dashboard/config) → viewBox=0 0 detectW detectH. Nguồn: realtime_objects
+         (bbox track age>=40s) + alert loitering (perception/alerts/loitering, field dwell_time). Người di chuyển ⇒ box trễ ~nhịp update.
+       - CROWD (CrowdOverlay, cam1_VIRAT_1 + cam_loiter): cluster_bbox đỏ #ef4444 nét đứt + box thành viên cụm xanh #22c55e
+         nét liền. bbox px tuyệt đối ở inference_resolution → viewBox theo inference_resolution. Nguồn: realtime_crowd
+         (perception/crowd/<cam>, clusters[] mỗi frame) + alert crowd. Chỉ vẽ khi person_count>=threshold.
+       - FIRE/SMOKE (FireOverlay, cam_fire): fire đỏ #ef4444, smoke lam #3b82f6 + nhãn class%; viewBox theo inference_resolution.
+       - LPR (LprOverlay, cam_lpr): box cyan #06b6d4 + text OCR + conf%; viewBox theo inference_resolution. Nguồn: realtime_lpr
+         (perception/lpr/<cam>) + alert lpr (perception/alerts/lpr, kèm plate_crop base64).
+       - Hằng số TTL trong dashboard/frontend/src/App.tsx: OVERLAY_TTL_MS (hiện 1200) dọn state crowd/loiter/fire;
+         LPR_OVERLAY_TTL_MS (hiện 2000) dọn state lpr; MAX_TIMELINE (hiện 80) số dòng event tối đa. Env backend/perception
+         REALTIME_OVERLAY_TTL_MS=1200 + REALTIME_ALERT_REPEAT_SECONDS=15 (docker-compose.yml). Sửa TS xong: docker compose up -d --build dashboard.
+    • EVENTS PANEL (EventsTimeline; App.tsx đẩy vào timeline khi nhận alert /ws) — CHỈ hiện kết quả bài toán realtime
+        (crowd khi person_count>=threshold, loitering, fire/smoke, lpr). KHÔNG fetch/trộn lịch sử /api/events và KHÔNG render
+        row frigate_event per-person/per-frame. LPR có card riêng (LprEventRow): ảnh crop biển số (plate_crop), text OCR
+        (mono) + det/ocr/conf %. Đây là bề mặt cảnh báo DUY NHẤT (đã bỏ toast). Sửa xong: docker compose up -d --build dashboard.
     • STREAM_CORE (Phase 1):
         - Các cấu hình (STREAM_CORE_CAMERAS, STREAM_CORE_RTSP_TEMPLATE, STREAM_CORE_FPS, v.v.) được đặt
           trong môi trường (environment) của service `stream_core` trong `docker-compose.yml`.
         - Sửa xong: `docker compose up -d stream_core` (recreate để nạp env mới).
     • PERCEPTION_WORKER (lane realtime chính):
-        - Các cấu hình: PERCEPTION_CAMERAS, PERCEPTION_PERSON_CAMERAS, PERCEPTION_FIRE_CAMERAS,
-          PERCEPTION_RTSP_TEMPLATE=rtsp://frigate:8554/{}, PERCEPTION_FPS, PERSON_DETECT_URL,
-          FIRE_SMOKE_ENDPOINT_URL, PERSON_DETECT_TIMEOUT, FIRE_DETECT_TIMEOUT, PERCEPTION_JPEG_QUALITY,
-          PERCEPTION_MIN_CONFIDENCE, LOITERING_DWELL_SECONDS, CROWD_THRESHOLD, CROWD_PERSIST_SECONDS,
-          CLUSTER_SIZE_RATIO_MIN, CLUSTER_DISTANCE_FACTOR, FIRE_CONFIDENCE, FIRE_PERSIST_N/M,
-          FIRE_CLEAR_SECONDS, PERCEPTION_TOPIC_PREFIX, PERCEPTION_STALE_SECONDS (30s để RTSP first-frame không bị giết sớm), PERCEPTION_RECONNECT_SECONDS.
+        - Các cấu hình: PERCEPTION_CAMERAS, PERCEPTION_PERSON_CAMERAS, PERCEPTION_FIRE_CAMERAS, PERCEPTION_LPR_CAMERAS,
+          PERCEPTION_RTSP_TEMPLATE=rtsp://frigate:8554/{}, PERCEPTION_FPS, LPR_FPS, PERSON_DETECT_URL,
+          FIRE_SMOKE_ENDPOINT_URL, LPR_ENDPOINT_URL, PERSON_DETECT_TIMEOUT, FIRE_DETECT_TIMEOUT, LPR_DETECT_TIMEOUT,
+          PERCEPTION_JPEG_QUALITY, PERCEPTION_MIN_CONFIDENCE, LOITERING_DWELL_SECONDS, CROWD_THRESHOLD,
+          CROWD_PERSIST_SECONDS, CLUSTER_SIZE_RATIO_MIN, CLUSTER_DISTANCE_FACTOR, FIRE_CONFIDENCE, FIRE_PERSIST_N/M,
+          FIRE_CLEAR_SECONDS, LPR_STABLE_N/M, LPR_ALERT_REPEAT_SECONDS, DETECTOR_HEALTH_TIMEOUT, PERCEPTION_TOPIC_PREFIX,
+          PERCEPTION_STALE_SECONDS (30s để RTSP first-frame không bị giết sớm), PERCEPTION_RECONNECT_SECONDS.
         - PERCEPTION_ALLOW_HTTP_FETCH=false mặc định: chặn cấu hình nhầm sang `/api/<cam>/latest.jpg`.
         - Sửa xong: `docker compose up -d --build perception_worker dashboard` nếu sửa code; env-only thì bỏ `--build`.
 =============================================================================
