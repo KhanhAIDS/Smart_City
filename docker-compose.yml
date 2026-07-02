@@ -119,6 +119,22 @@ services:
               count: 1
               capabilities: [gpu]
 
+  traffic_violation_gpu:
+    container_name: traffic_violation_gpu
+    build: ./model_workers/traffic_violation_gpu
+    restart: unless-stopped
+    mem_limit: 8g
+    cpus: "4.0"
+    volumes:
+      - ./model_cache/traffic_hf:/opt/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   ai_worker:
     depends_on:
       - mqtt
@@ -205,6 +221,7 @@ services:
       - crowd_gpu
       - fire_gpu
       - lpr_gpu
+      - traffic_violation_gpu
     container_name: perception_worker
     build: 
       context: .
@@ -217,8 +234,10 @@ services:
     environment:
       - MQTT_HOST=mqtt
       - MQTT_PORT=1883
-      - PERCEPTION_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire,cam_lpr
+      - PERCEPTION_CAMERAS=cam1_VIRAT_1,cam_loiter,cam_fire,cam_lpr,cam_traffic_violation
       - PERCEPTION_PERSON_CAMERAS=cam1_VIRAT_1,cam_loiter
+      - PERCEPTION_STOPPED_CAMERAS=cam_traffic_violation
+      - PERCEPTION_HELMET_CAMERAS=cam_traffic_violation
       - PERCEPTION_FIRE_CAMERAS=cam_fire
       - PERCEPTION_LPR_CAMERAS=cam_lpr
       - PERCEPTION_RTSP_TEMPLATE=rtsp://frigate:8554/{}
@@ -254,3 +273,19 @@ services:
       - PERCEPTION_TOPIC_PREFIX=perception
       - REALTIME_OVERLAY_TTL_MS=1200
       - REALTIME_ALERT_REPEAT_SECONDS=15
+      - TRAFFIC_VIOLATION_ENDPOINT_URL=http://traffic_violation_gpu:8000/detect
+      - TRAFFIC_DETECT_TIMEOUT=10
+      - TRAFFIC_FPS=5
+      - STOPPED_DWELL_SECONDS=10
+      - STOPPED_SPEED_RATIO_MAX=0.03
+      - STOPPED_CLEAR_SECONDS=3
+      - STOPPED_TRACK_LOST_SECONDS=2
+      - STOPPED_MIN_BBOX_HEIGHT=35
+      - HELMET_PERSIST_N=2
+      - HELMET_PERSIST_M=5
+      - HELMET_MIN_CONFIDENCE=0.45
+      - NO_HELMET_MIN_CONFIDENCE=0.45
+      - HELMET_ALERT_REPEAT_SECONDS=30
+      - TRAFFIC_ALERT_REPEAT_SECONDS=15
+      - TRAFFIC_ATTACH_LPR=true
+      - TRAFFIC_NO_STOP_ZONES={"cam_traffic_violation":[{"id":"main_lane","points":[[400,400],[1520,400],[1920,1080],[0,1080]],"min_bbox_height":35}]}

@@ -5,6 +5,8 @@ import type {
   LoiterOverlayState,
   FireOverlayState,
   LprOverlayState,
+  StoppedVehicleOverlayState,
+  NoHelmetOverlayState,
 } from "../types";
 import { startWebRTC } from "../lib/liveStream";
 import { snapshotUrl } from "../lib/api";
@@ -15,6 +17,8 @@ interface Props {
   loiter?: LoiterOverlayState;
   fire?: FireOverlayState;
   lpr?: LprOverlayState;
+  stopped?: StoppedVehicleOverlayState;
+  noHelmet?: NoHelmetOverlayState;
 }
 
 function FireOverlay({ fire }: { fire: FireOverlayState }) {
@@ -144,6 +148,40 @@ function LoiterOverlay({ loiter }: { loiter: LoiterOverlayState }) {
   );
 }
 
+function StoppedVehicleOverlay({ stopped }: { stopped: StoppedVehicleOverlayState }) {
+  if (!stopped.vehicles) return null;
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+      {stopped.vehicles.map((v, i) => {
+        const [x1, y1, x2, y2] = v.bbox;
+        const color = "#f59e0b"; // amber-500
+        return (
+          <g key={i}>
+            <rect style={{ transition: "all 0.15s linear" }} x={x1} y={y1} width={x2 - x1} height={y2 - y1} fill="none" stroke={color} strokeWidth={4} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function NoHelmetOverlay({ noHelmet }: { noHelmet: NoHelmetOverlayState }) {
+  if (!noHelmet.noHelmets) return null;
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+      {noHelmet.noHelmets.map((nh, i) => {
+        const [x1, y1, x2, y2] = nh.bbox;
+        const color = "#ef4444"; // red-500
+        return (
+          <g key={i}>
+            <rect style={{ transition: "all 0.15s linear" }} x={x1} y={y1} width={x2 - x1} height={y2 - y1} fill="none" stroke={color} strokeWidth={4} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function CrowdOverlay({ crowd }: { crowd: CrowdOverlayState }) {
   if (!crowd.inferenceResolution) return null;
   const [w, h] = crowd.inferenceResolution;
@@ -242,7 +280,7 @@ async function captureFrame(camera: string) {
   }
 }
 
-export default function CameraTile({ camera, crowd, loiter, fire, lpr }: Props) {
+export default function CameraTile({ camera, crowd, loiter, fire, lpr, stopped, noHelmet }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [webrtcFailed, setWebrtcFailed] = useState(false);
   const [forceSnapshot, setForceSnapshot] = useState(false);
@@ -297,9 +335,13 @@ export default function CameraTile({ camera, crowd, loiter, fire, lpr }: Props) 
   const fireActive = !!fire && fire.active;
   const loiterActive = !!loiter && loiter.active;
   const lprActive = !!lpr && lpr.plates.length > 0;
+  const stoppedActive = !!stopped && stopped.vehicles && stopped.vehicles.length > 0;
+  const noHelmetActive = !!noHelmet && noHelmet.noHelmets && noHelmet.noHelmets.length > 0;
 
   let border = "border-gray-800";
   if (fireActive) border = "border-red-600";
+  else if (noHelmetActive) border = "border-red-500";
+  else if (stoppedActive) border = "border-amber-500";
   else if (crowdOver) border = "border-red-500";
   else if (loiterActive) border = "border-amber-500";
   else if (lprActive) border = "border-cyan-500";
@@ -320,6 +362,8 @@ export default function CameraTile({ camera, crowd, loiter, fire, lpr }: Props) 
 
       {fire && fire.active && <FireOverlay fire={fire} />}
       {lpr && <LprOverlay lpr={lpr} />}
+      {stopped && stopped.vehicles && <StoppedVehicleOverlay stopped={stopped} />}
+      {noHelmet && noHelmet.noHelmets && <NoHelmetOverlay noHelmet={noHelmet} />}
       {loiter && loiter.active && <LoiterOverlay loiter={loiter} />}
       {crowd && <CrowdOverlay crowd={crowd} />}
 
@@ -368,6 +412,16 @@ export default function CameraTile({ camera, crowd, loiter, fire, lpr }: Props) 
         {loiterActive && (
           <span className="text-xs px-2 py-0.5 rounded bg-amber-500 text-black font-semibold">
             LOITERING
+          </span>
+        )}
+        {stoppedActive && (
+          <span className="text-xs px-2 py-0.5 rounded bg-amber-500 text-black font-semibold">
+            STOPPED {stopped!.vehicles.length}
+          </span>
+        )}
+        {noHelmetActive && (
+          <span className="text-xs px-2 py-0.5 rounded bg-red-500 text-white font-semibold animate-pulse">
+            NO HELMET {noHelmet!.noHelmets.length}
           </span>
         )}
         {lprActive && (

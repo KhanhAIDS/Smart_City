@@ -26,6 +26,8 @@ CAMERAS = csv_env("PERCEPTION_CAMERAS", "cam1_VIRAT_1,cam_loiter,cam_fire")
 PERSON_CAMERAS = set(csv_env("PERCEPTION_PERSON_CAMERAS", "cam1_VIRAT_1,cam_loiter"))
 FIRE_CAMERAS = set(csv_env("PERCEPTION_FIRE_CAMERAS", "cam_fire"))
 LPR_CAMERAS = set(csv_env("PERCEPTION_LPR_CAMERAS", ""))
+STOPPED_CAMERAS = set(csv_env("PERCEPTION_STOPPED_CAMERAS", ""))
+HELMET_CAMERAS = set(csv_env("PERCEPTION_HELMET_CAMERAS", ""))
 RTSP_TEMPLATE = os.getenv("PERCEPTION_RTSP_TEMPLATE", "rtsp://frigate:8554/{}")
 FPS = float(os.getenv("PERCEPTION_FPS", "8"))
 STALE_SECONDS = float(os.getenv("PERCEPTION_STALE_SECONDS", "30"))
@@ -62,6 +64,28 @@ LPR_MIN_DET_CONF = float(os.getenv("LPR_MIN_DET_CONF", "0.5"))
 LPR_CROP_PAD_RATIO = float(os.getenv("LPR_CROP_PAD_RATIO", "0.12"))
 LPR_CROP_MAX_WIDTH = int(os.getenv("LPR_CROP_MAX_WIDTH", "320"))
 LPR_CROP_JPEG_QUALITY = int(os.getenv("LPR_CROP_JPEG_QUALITY", "80"))
+TRAFFIC_VIOLATION_ENDPOINT_URL = os.getenv("TRAFFIC_VIOLATION_ENDPOINT_URL", "http://traffic_violation_gpu:8000/detect")
+TRAFFIC_DETECT_TIMEOUT = float(os.getenv("TRAFFIC_DETECT_TIMEOUT", "10"))
+TRAFFIC_FPS = float(os.getenv("TRAFFIC_FPS", "5"))
+STOPPED_DWELL_SECONDS = float(os.getenv("STOPPED_DWELL_SECONDS", "10"))
+STOPPED_SPEED_RATIO_MAX = float(os.getenv("STOPPED_SPEED_RATIO_MAX", "0.03"))
+STOPPED_CLEAR_SECONDS = float(os.getenv("STOPPED_CLEAR_SECONDS", "3"))
+STOPPED_TRACK_LOST_SECONDS = float(os.getenv("STOPPED_TRACK_LOST_SECONDS", "2"))
+STOPPED_MIN_BBOX_HEIGHT = float(os.getenv("STOPPED_MIN_BBOX_HEIGHT", "35"))
+HELMET_PERSIST_N = int(os.getenv("HELMET_PERSIST_N", "2"))
+HELMET_PERSIST_M = int(os.getenv("HELMET_PERSIST_M", "5"))
+HELMET_MIN_CONFIDENCE = float(os.getenv("HELMET_MIN_CONFIDENCE", "0.45"))
+NO_HELMET_MIN_CONFIDENCE = float(os.getenv("NO_HELMET_MIN_CONFIDENCE", "0.45"))
+HELMET_ALERT_REPEAT_SECONDS = float(os.getenv("HELMET_ALERT_REPEAT_SECONDS", "30"))
+TRAFFIC_ALERT_REPEAT_SECONDS = float(os.getenv("TRAFFIC_ALERT_REPEAT_SECONDS", "15"))
+TRAFFIC_ATTACH_LPR = os.getenv("TRAFFIC_ATTACH_LPR", "true").lower() in {"1", "true", "yes", "on"}
+
+TRAFFIC_NO_STOP_ZONES = {}
+try:
+    _zones_str = os.getenv("TRAFFIC_NO_STOP_ZONES", "{}")
+    TRAFFIC_NO_STOP_ZONES = json.loads(_zones_str)
+except Exception as e:
+    print(f"Error parsing TRAFFIC_NO_STOP_ZONES: {e}")
 DETECTOR_HEALTH_TIMEOUT = float(os.getenv("DETECTOR_HEALTH_TIMEOUT", "5"))
 ALLOW_HTTP_FRAME_FETCH = os.getenv("PERCEPTION_ALLOW_HTTP_FETCH", "false").strip().lower() in {"1", "true", "yes", "on"}
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000")
@@ -91,6 +115,12 @@ class CameraState:
         self.last_fire_alert_time = 0.0
         self.lpr_history = deque(maxlen=LPR_STABLE_M)
         self.last_lpr_alert_times = {}
+        self.traffic_tracker = sv.ByteTrack()
+        self.rider_tracker = sv.ByteTrack()
+        self.stopped_track_states = {}
+        self.helmet_track_states = {}
+        self.last_traffic_alert_times = {}
+        self.traffic_lpr_cache = {}
 
 
 states = {cam: CameraState() for cam in CAMERAS}
@@ -253,6 +283,8 @@ def check_detector_health():
         urls.append(FIRE_SMOKE_ENDPOINT_URL.replace("/detect", "/health"))
     if LPR_CAMERAS:
         urls.append(LPR_ENDPOINT_URL.replace("/detect", "/health"))
+    if STOPPED_CAMERAS or HELMET_CAMERAS:
+        urls.append(TRAFFIC_VIOLATION_ENDPOINT_URL.replace("/detect", "/health"))
     try:
         return all(requests.get(url, timeout=DETECTOR_HEALTH_TIMEOUT).ok for url in urls)
     except Exception:
@@ -665,6 +697,175 @@ def process_lpr_frame(camera, st, session, jpeg_bytes, frame, frame_meta, now):
         st.last_lpr_alert_times[text] = now
 
 
+def point_in_polygon(pt, poly):
+    return cv2.pointPolygonTest(np.array(poly, dtype=np.int32), (pt[0], pt[1]), False) >= 0
+
+def handle_stopped_vehicle(camera, st, frame_meta, vehicles, current_vehicle_ids, now):
+    zones = TRAFFIC_NO_STOP_ZONES.get(camera, [])
+    
+    for tid in sorted(current_vehicle_ids):
+        state = st.stopped_track_states.get(tid)
+        if not state:
+            continue
+        bbox = state["bbox"]
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        bh = bbox[3] - bbox[1]
+        
+        hit_zone = None
+        for z in zones:
+            if bh >= z.get("min_bbox_height", STOPPED_MIN_BBOX_HEIGHT):
+                if point_in_polygon((cx, cy), z.get("points", [])):
+                    hit_zone = z.get("id")
+                    break
+        
+        state["history"].append((now, cx, cy, bh))
+        if len(state["history"]) > 30:
+            state["history"] = state["history"][-30:]
+            
+        if hit_zone:
+            hist = state["history"]
+            if len(hist) > 5:
+                dt = hist[-1][0] - hist[0][0]
+                dx = hist[-1][1] - hist[0][1]
+                dy = hist[-1][2] - hist[0][2]
+                disp = (dx**2 + dy**2)**0.5
+                med_bh = np.median([h[3] for h in hist])
+                speed_ratio = (disp / dt) / med_bh if (dt > 0 and med_bh > 0) else 0
+            else:
+                speed_ratio = 0.0
+
+            is_stopped = speed_ratio <= STOPPED_SPEED_RATIO_MAX
+
+            if is_stopped:
+                if state["stopped_since"] is None:
+                    state["stopped_since"] = now
+                dwell = now - state["stopped_since"]
+                if dwell >= STOPPED_DWELL_SECONDS:
+                    state["alert_active"] = True
+                    last_alert = st.last_traffic_alert_times.get(f"stopped_{tid}", 0.0)
+                    if now - last_alert >= TRAFFIC_ALERT_REPEAT_SECONDS:
+                        plate_info = st.traffic_lpr_cache.get(f"v_{tid}", {})
+                        alert = {
+                            **frame_meta, "timestamp": frame_meta["wall_ts"], "active": True,
+                            "object_id": f"{camera}:v:{tid}", "vehicle_class": state.get("class", "vehicle"),
+                            "bbox": bbox, "zone_id": hit_zone, "dwell_time": dwell,
+                            "speed_ratio": speed_ratio, "inference_resolution": [frame_meta["width"], frame_meta["height"]]
+                        }
+                        if plate_info: alert.update(plate_info)
+                        publish(f"{TOPIC_PREFIX}/alerts/stopped_vehicle", alert)
+                        st.last_traffic_alert_times[f"stopped_{tid}"] = now
+            else:
+                if state["stopped_since"] is not None:
+                    state["moving_since"] = state.get("moving_since") or now
+                    if now - state["moving_since"] >= STOPPED_CLEAR_SECONDS:
+                        state["stopped_since"] = None
+                        if state.get("alert_active"):
+                            publish(f"{TOPIC_PREFIX}/alerts/stopped_vehicle", {**frame_meta, "timestamp": frame_meta["wall_ts"], "active": False, "object_id": f"{camera}:v:{tid}"})
+                            state["alert_active"] = False
+                else:
+                    state["moving_since"] = None
+        else:
+            state["stopped_since"] = None
+            if state.get("alert_active"):
+                publish(f"{TOPIC_PREFIX}/alerts/stopped_vehicle", {**frame_meta, "timestamp": frame_meta["wall_ts"], "active": False, "object_id": f"{camera}:v:{tid}"})
+                state["alert_active"] = False
+
+    missing = [tid for tid in st.stopped_track_states if tid not in current_vehicle_ids]
+    for tid in missing:
+        state = st.stopped_track_states[tid]
+        if now - state["last_seen"] > STOPPED_TRACK_LOST_SECONDS:
+            if state.get("alert_active"):
+                publish(f"{TOPIC_PREFIX}/alerts/stopped_vehicle", {**frame_meta, "timestamp": frame_meta["wall_ts"], "active": False, "object_id": f"{camera}:v:{tid}"})
+            del st.stopped_track_states[tid]
+
+def process_traffic_frame(camera, st, session, jpeg_bytes, frame, frame_meta, now):
+    result, latency = query_detector(session, TRAFFIC_VIOLATION_ENDPOINT_URL, jpeg_bytes, TRAFFIC_DETECT_TIMEOUT)
+    update_latency(st, latency)
+    frame_meta["model"] = result.get("model", "traffic-detector")
+    
+    vehicles, riders, helmets, no_helmets = result.get("vehicles", []), result.get("riders", []), result.get("helmets", []), result.get("no_helmets", [])
+    
+    current_vehicle_ids = set()
+    if camera in STOPPED_CAMERAS:
+        if vehicles:
+            xyxy, conf = np.array([v["bbox"] for v in vehicles], dtype=float), np.array([v["confidence"] for v in vehicles], dtype=float)
+            sv_dets = sv.Detections(xyxy=xyxy, confidence=conf, class_id=np.zeros(len(vehicles), dtype=int))
+        else:
+            sv_dets = sv.Detections.empty()
+        
+        tracked = st.traffic_tracker.update_with_detections(sv_dets)
+        pub_vehicles = []
+        for i in range(len(tracked)):
+            bbox = [float(x) for x in tracked.xyxy[i].tolist()]
+            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
+            current_vehicle_ids.add(tid)
+            v_cls = "car"
+            for v in vehicles:
+                if sv.box_iou_batch(np.array([bbox]), np.array([v["bbox"]]))[0][0] > 0.5:
+                    v_cls = v["class"]
+                    break
+            
+            state = st.stopped_track_states.setdefault(tid, {"first_seen": now, "last_seen": now, "history": [], "stopped_since": None, "moving_since": None, "alert_active": False, "class": v_cls})
+            state["last_seen"], state["bbox"] = now, bbox
+            pub_vehicles.append({"track_id": f"{camera}:v:{tid}", "class": v_cls, "bbox": bbox})
+            
+        publish(f"{TOPIC_PREFIX}/stopped_vehicle/{camera}", {"schema": "stopped_vehicle.v1", **frame_meta, "vehicles": pub_vehicles, "zones": TRAFFIC_NO_STOP_ZONES.get(camera, [])})
+        handle_stopped_vehicle(camera, st, frame_meta, pub_vehicles, current_vehicle_ids, now)
+
+    if camera in HELMET_CAMERAS:
+        pub_no_helmets = [nh for nh in no_helmets if nh["confidence"] >= NO_HELMET_MIN_CONFIDENCE]
+        associations = []
+        for i, nh in enumerate(pub_no_helmets):
+            nh_cx, nh_cy = (nh["bbox"][0] + nh["bbox"][2]) / 2, (nh["bbox"][1] + nh["bbox"][3]) / 2
+            associated = False
+            for j, r in enumerate(riders):
+                rb = r["bbox"]
+                if rb[0] <= nh_cx <= rb[2] and rb[1] <= nh_cy <= rb[1] + (rb[3]-rb[1])*0.5:
+                    associations.append({"no_helmet_index": i, "rider_index": j})
+                    associated = True
+                    break
+            if not associated:
+                for j, v in enumerate(vehicles):
+                    if v["class"] == "motorcycle":
+                        vb = v["bbox"]
+                        if vb[0] <= nh_cx <= vb[2] and vb[1] <= nh_cy <= vb[1] + (vb[3]-vb[1])*0.55:
+                            riders.append({"bbox": vb, "class": "rider", "confidence": v["confidence"]})
+                            associations.append({"no_helmet_index": i, "rider_index": len(riders)-1})
+                            break
+        
+        pub_helmets = [h for h in helmets if h["confidence"] >= HELMET_MIN_CONFIDENCE]
+        publish(f"{TOPIC_PREFIX}/helmet/{camera}", {"schema": "helmet.v1", **frame_meta, "riders": riders, "helmets": pub_helmets, "no_helmets": pub_no_helmets, "associations": associations})
+
+        if riders:
+            xyxy, conf = np.array([r["bbox"] for r in riders], dtype=float), np.array([r["confidence"] for r in riders], dtype=float)
+            tracked = st.rider_tracker.update_with_detections(sv.Detections(xyxy=xyxy, confidence=conf, class_id=np.zeros(len(riders), dtype=int)))
+            
+            for i in range(len(tracked)):
+                bbox = [float(x) for x in tracked.xyxy[i].tolist()]
+                tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
+                state = st.helmet_track_states.setdefault(tid, {"history": deque(maxlen=HELMET_PERSIST_M), "last_alert": 0.0})
+                
+                has_nh, nh_bbox, conf_val = False, None, 0.0
+                for assoc in associations:
+                    rb = riders[assoc["rider_index"]]["bbox"]
+                    if sv.box_iou_batch(np.array([bbox]), np.array([rb]))[0][0] > 0.5:
+                        has_nh, nh_idx = True, assoc["no_helmet_index"]
+                        nh_bbox, conf_val = pub_no_helmets[nh_idx]["bbox"], pub_no_helmets[nh_idx]["confidence"]
+                        break
+                
+                state["history"].append(has_nh)
+                if sum(state["history"]) >= HELMET_PERSIST_N:
+                    if now - state["last_alert"] >= HELMET_ALERT_REPEAT_SECONDS:
+                        publish(f"{TOPIC_PREFIX}/alerts/no_helmet", {
+                            **frame_meta, "timestamp": frame_meta["wall_ts"], "active": True, "object_id": f"{camera}:r:{tid}", "rider_bbox": bbox,
+                            "no_helmet_bbox": nh_bbox, "confidence": conf_val, "inference_resolution": [frame_meta["width"], frame_meta["height"]], "vehicle_crop": crop_plate(frame, bbox)
+                        })
+                        state["last_alert"] = now
+        else:
+            st.rider_tracker.update_with_detections(sv.Detections.empty())
+
+
 def task_due(now, last_ts, fps):
     return fps > 0 and now - last_ts >= 1.0 / fps
 
@@ -691,7 +892,7 @@ def process_camera(camera):
             st.force_reconnect = False
             st.last_seen = time.time()
         last_seq = 0
-        last_task_ts = {"person": 0.0, "fire": 0.0, "lpr": 0.0}
+        last_task_ts = {"person": 0.0, "fire": 0.0, "lpr": 0.0, "traffic": 0.0}
 
         while True:
             with metrics_lock:
@@ -719,6 +920,8 @@ def process_camera(camera):
                 tasks.append("fire")
             if camera in LPR_CAMERAS and task_due(now, last_task_ts["lpr"], LPR_FPS):
                 tasks.append("lpr")
+            if (camera in STOPPED_CAMERAS or camera in HELMET_CAMERAS) and task_due(now, last_task_ts["traffic"], TRAFFIC_FPS):
+                tasks.append("traffic")
             if not tasks:
                 continue
 
@@ -737,6 +940,8 @@ def process_camera(camera):
                         process_fire_frame(camera, st, session, jpeg_bytes, frame_meta.copy(), now)
                     elif task == "lpr":
                         process_lpr_frame(camera, st, session, jpeg_bytes, frame, frame_meta.copy(), now)
+                    elif task == "traffic":
+                        process_traffic_frame(camera, st, session, jpeg_bytes, frame, frame_meta.copy(), now)
                     ran = True
                 except Exception as exc:
                     with metrics_lock:

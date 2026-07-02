@@ -5,6 +5,8 @@ import type {
   LoiterOverlayState,
   FireOverlayState,
   LprOverlayState,
+  StoppedVehicleOverlayState,
+  NoHelmetOverlayState,
   TimelineEntry,
   WsMessage,
 } from "./types";
@@ -40,6 +42,8 @@ export default function App() {
   const [loiters, setLoiters] = useState<Record<string, LoiterOverlayState>>({});
   const [fires, setFires] = useState<Record<string, FireOverlayState>>({});
   const [lprs, setLprs] = useState<Record<string, LprOverlayState>>({});
+  const [stoppedVehicles, setStoppedVehicles] = useState<Record<string, StoppedVehicleOverlayState>>({});
+  const [noHelmets, setNoHelmets] = useState<Record<string, NoHelmetOverlayState>>({});
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
 
   const counter = useRef(0);
@@ -63,6 +67,8 @@ export default function App() {
       setLoiters((prev) => pruneStale(prev, now, OVERLAY_TTL_MS));
       setFires((prev) => pruneStale(prev, now, OVERLAY_TTL_MS));
       setLprs((prev) => pruneStale(prev, now, LPR_OVERLAY_TTL_MS));
+      setStoppedVehicles((prev) => pruneStale(prev, now, 1500));
+      setNoHelmets((prev) => pruneStale(prev, now, 2000));
     }, 500);
     return () => clearInterval(t);
   }, []);
@@ -143,6 +149,24 @@ export default function App() {
         [d.camera]: {
           plates,
           inferenceResolution: [d.width, d.height],
+          receivedAt: now,
+        },
+      }));
+    } else if (msg.type === "realtime_stopped_vehicle") {
+      const d = msg.data;
+      setStoppedVehicles((prev) => ({
+        ...prev,
+        [d.camera]: {
+          vehicles: d.vehicles || [],
+          receivedAt: now,
+        },
+      }));
+    } else if (msg.type === "realtime_helmet") {
+      const d = msg.data;
+      setNoHelmets((prev) => ({
+        ...prev,
+        [d.camera]: {
+          noHelmets: d.no_helmets || [],
           receivedAt: now,
         },
       }));
@@ -250,6 +274,29 @@ export default function App() {
                conf: d.confidence,
              });
           }
+      } else if (d.zone_id !== undefined || d.speed_ratio !== undefined) {
+          if (d.active) {
+              pushTimeline({
+                 kind: "stopped_vehicle",
+                 camera: d.camera,
+                 text: `Stopped ${Math.round(d.dwell_time || 0)}s`,
+                 ts: now,
+                 imageUrl: d.vehicle_crop,
+                 plateText: d.plate_text,
+              });
+          }
+      } else if (d.no_helmet_bbox !== undefined) {
+          if (d.active) {
+              pushTimeline({
+                 kind: "no_helmet",
+                 camera: d.camera,
+                 text: `No Helmet (${Math.round((d.confidence || 0) * 100)}%)`,
+                 ts: now,
+                 imageUrl: d.vehicle_crop || d.plate_crop,
+                 plateText: d.plate_text,
+                 conf: d.confidence,
+              });
+          }
       }
     } else if (msg.type === "crowd_alert" || msg.type === "loitering_alert" || msg.type === "fire_smoke_alert") {
        // fallback for old ai_worker
@@ -287,7 +334,7 @@ export default function App() {
         {tab === "live" ? (
           <div className="h-full flex">
             <div className="flex-1 overflow-y-auto">
-              <CameraGrid cameras={cameras} crowd={crowdOverlays} loiter={loiters} fire={fires} lpr={lprs} />
+              <CameraGrid cameras={cameras} crowd={crowdOverlays} loiter={loiters} fire={fires} lpr={lprs} stopped={stoppedVehicles} noHelmet={noHelmets} />
             </div>
             <div className="w-80 shrink-0 h-full">
               <EventsTimeline entries={timeline} />

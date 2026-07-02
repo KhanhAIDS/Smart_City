@@ -21,6 +21,48 @@ export interface PlateDetection {
   confidence: number;
 }
 
+export interface TrafficVehicle {
+  track_id: string;
+  class: string;
+  bbox: Bbox;
+}
+
+export interface HelmetDetection {
+  bbox: Bbox;
+  class: string;
+  confidence: number;
+}
+
+export interface StoppedVehicleAlert {
+  camera: string;
+  active: boolean;
+  object_id: string;
+  vehicle_class?: string;
+  bbox: Bbox;
+  zone_id?: string;
+  dwell_time: number;
+  speed_ratio: number;
+  plate_text?: string;
+  vehicle_crop?: string;
+  inference_resolution?: [number, number];
+  timestamp: string;
+}
+
+export interface NoHelmetAlert {
+  camera: string;
+  active: boolean;
+  object_id: string;
+  vehicle_bbox?: Bbox;
+  rider_bbox?: Bbox;
+  no_helmet_bbox: Bbox;
+  confidence: number;
+  plate_text?: string;
+  plate_crop?: string;
+  vehicle_crop?: string;
+  inference_resolution?: [number, number];
+  timestamp: string;
+}
+
 export interface CrowdAlert {
   camera: string;
   person_count: number;
@@ -92,6 +134,8 @@ export type WsMessage =
   | { type: "realtime_crowd"; data: RealtimeCrowdMsg }
   | { type: "realtime_fire_smoke"; data: RealtimeFireSmokeMsg }
   | { type: "realtime_lpr"; data: RealtimeLprMsg }
+  | { type: "realtime_stopped_vehicle"; data: RealtimeStoppedVehicleMsg }
+  | { type: "realtime_helmet"; data: RealtimeHelmetMsg }
   | { type: "realtime_alert"; data: RealtimeAlertMsg };
 
 export interface BenchmarkModelResult {
@@ -112,7 +156,7 @@ export interface BenchmarkResponse {
   results: BenchmarkModelResult[];
 }
 
-export type AlertKind = "crowd" | "loitering" | "fire" | "lpr";
+export type AlertKind = "crowd" | "loitering" | "fire" | "lpr" | "stopped_vehicle" | "no_helmet";
 
 export interface TimelineEntry {
   id: string;
@@ -162,6 +206,16 @@ export interface LprOverlayState {
   receivedAt: number;
 }
 
+export interface StoppedVehicleOverlayState {
+  vehicles: TrafficVehicle[];
+  receivedAt: number;
+}
+
+export interface NoHelmetOverlayState {
+  noHelmets: HelmetDetection[];
+  receivedAt: number;
+}
+
 export interface RealtimeObject {
   id: string;
   track_id: string;
@@ -208,6 +262,26 @@ export interface RealtimeLprMsg {
   plates: PlateDetection[];
   plate_count: number;
 }
+export interface RealtimeStoppedVehicleMsg {
+  camera: string;
+  source: string;
+  frame_id: number;
+  width: number;
+  height: number;
+  vehicles: TrafficVehicle[];
+  zones?: any[];
+}
+export interface RealtimeHelmetMsg {
+  camera: string;
+  source: string;
+  frame_id: number;
+  width: number;
+  height: number;
+  riders: HelmetDetection[];
+  helmets: HelmetDetection[];
+  no_helmets: HelmetDetection[];
+  associations: any[];
+}
 export interface RealtimeAlertMsg {
   camera: string;
   source: string;
@@ -238,4 +312,12 @@ export interface RealtimeAlertMsg {
   ocr_confidence?: number;
   confidence?: number;
   plate_crop?: string;
+  // Traffic
+  vehicle_class?: string;
+  zone_id?: string;
+  speed_ratio?: number;
+  vehicle_crop?: string;
+  vehicle_bbox?: Bbox | null;
+  rider_bbox?: Bbox | null;
+  no_helmet_bbox?: Bbox | null;
 }

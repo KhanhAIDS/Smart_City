@@ -62,6 +62,8 @@ go2rtc:
       - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/cam_fire_baseline.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
     cam_lpr:
       - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/Ground-level_off-side_road.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
+    cam_traffic_violation:
+      - "exec:/usr/lib/ffmpeg/rpi/bin/ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -fflags +genpts -i /media/frigate/videos/cam_traffic_violation.mp4 -c copy -rtsp_transport tcp -f rtsp {{output}}"
     cam4_entry_area:
       - ffmpeg:/media/frigate/videos/motion-detection-entry-area-1280x720.mp4
     cam6_warehouse_door:
@@ -121,6 +123,18 @@ cameras:
       width: 1920
       height: 1080
       fps: 2
+
+  cam_traffic_violation:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/cam_traffic_violation
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      width: 1920
+      height: 1080
+      fps: 5
 
 
 

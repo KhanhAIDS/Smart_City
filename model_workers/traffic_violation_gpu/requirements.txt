@@ -1,0 +1,6 @@
+ultralytics
+huggingface_hub
+pillow
+numpy
+fastapi
+uvicorn[standard]
